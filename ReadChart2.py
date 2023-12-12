@@ -5,7 +5,7 @@ from pdfminer.converter import PDFPageAggregator
 from pdfminer.pdfpage import PDFPage
 from io import StringIO
 import numpy as np
-import sys
+import sys,csv,os
 # pip install reportlab
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
@@ -15,36 +15,61 @@ from reportlab.lib.units import mm
 
 cc = 25.4/72.0
 
-def extract_lines_from_pdf(pdf_path):
+def Read_Elements_from_pdf(pdf_path):
     laparams = LAParams()
     
     # PDFMinerのツールの準備
     resourceManager = PDFResourceManager()
     outfp = StringIO()
     # PDFから単語を取得するためのデバイス
-    device = PDFPageAggregator(resourceManager, laparams=LAParams())
+    # device = PDFPageAggregator(resourceManager, laparams=LAParams())
     # PDFから１文字ずつを取得するためのデバイス
     device2 = PDFPageAggregator(resourceManager)
 
-    interpreter = PDFPageInterpreter(resourceManager, device)
+    # interpreter = PDFPageInterpreter(resourceManager, device)
     interpreter2 = PDFPageInterpreter(resourceManager, device2)
     
     fp = open(pdf_path, 'rb')
     ElementData= {}
-    PageKind = "断面リスト"
-    EKnd = ["壁"]
+    PageKind = ["構造計算書","断面リスト"]
+    # EKnd = ["壁"]
     # EKnd = ["小梁","壁"]
-    # EKnd = ["大梁","柱","片持梁","小梁","壁"]
+    # EKnd = ["【大梁】","【基礎大梁】","【柱】","【片持梁】","【小梁】","【基礎小梁】","【壁】"]
+    EKnd = ["【大梁】","【基礎大梁】","【柱】"]
     # EKnd = ["大梁","柱"]
     for EK in EKnd:
-        Elements= {}
-        for page in PDFPage.get_pages(fp):
-            CR = ChartReader()
-            interpreter2.process_page(page)
-            element = CR.ChartDevider(interpreter ,device ,interpreter2 ,device2 ,page,PageKind,EK)
-            Elements= Elements | element
-        #next
-        ElementData[EK] = Elements
+        ElementData[EK] = {}
+    #next
+    # Elements= {}
+    pageN = 0
+    CR = ChartReader()
+    stopFlag = False
+    for page in PDFPage.get_pages(fp):
+        pageN += 1
+        print ("page={}:".format(pageN),end="")
+        # interpreter.process_page(page)
+        # interpreter2.process_page(page)
+        
+        dflag, element = CR.ChartDevider(interpreter2 ,device2 ,page,PageKind,EKnd)
+        if dflag :
+            for EK in EKnd:
+                if len(element[EK])>0:
+                    ElementData[EK]= ElementData[EK] | element[EK]
+                #end if
+            #next
+            if not stopFlag :
+                stopFlag = True
+            #enf if
+        else:
+            if stopFlag:
+                break
+            #end if
+        #en if
+        # else:
+        #     print("")
+        # #end if
+    #next
+    # ElementData[EK] = Elements
     fp.close()
 
     return ElementData
@@ -71,7 +96,7 @@ class ChartReader:
         pdfmetrics.registerFont(TTFont(self.fontname2, IPAEXG_TTF))
     #end def
 
-    def ChartDevider(self,interpreter ,device ,interpreter2 ,device2 ,page,PageKind,EKind):
+    def ChartDevider(self,interpreter2 ,device2 ,page,PageKind,EKind2):
         """
         ・すべての水平線および垂直線のデータを辞書にしてリストを作成
         ・その際、それらの太線のみのリストも作成
@@ -87,21 +112,39 @@ class ChartReader:
             ・境界線より右側にある垂直線でy0およびy1が表の最上部と最下部の内側にあるものは破棄
         """
 
-        interpreter.process_page(page)
-        layout = device.get_result()
+        EKElement = {}
+        for EK in EKind2:
+            EKElement[EK] = {}
+        #next
+
+        # interpreter.process_page(page)
+        # layout = device.get_result()
         interpreter2.process_page(page)
         layout2 = device2.get_result()
 
         LineText , CharData, LineData =  self.MakeChar(page, interpreter2, device2)
-        DataFlag = False
-        for Line in LineText:
-            if PageKind in Line :
-                DataFlag = True
-                break
-            #end if
-        #next 
-        if not DataFlag:
-            return {}
+        if len(CharData)<10:
+            print("")
+            return False,{}
+        
+        DataFlag1 = []
+        for Pkind in PageKind:
+            DataFlag = False
+            for Line in LineText:
+                if Pkind in Line :
+                    DataFlag = True
+                    break
+                #end if
+            #next 
+            DataFlag1.append(DataFlag)
+        #next
+        DataFlag2 = True
+        for f in DataFlag1:
+            DataFlag2 = DataFlag2 and f
+        #next
+        if not DataFlag2 or len(LineData)==0:
+            print("")
+            return False,{}
 
         HLineData = []      # すべての水平線の辞書のリスト
         HLineX0 = []        # すべての水平線のx0のリスト
@@ -112,19 +155,40 @@ class ChartReader:
         # VLineHeight = []
         VBoldLineData = []  # 太線の垂直線の辞書のリスト
 
+        thinMin = 1000
+        thinMax = 0
+        cc = 0
+        thin = []
+        for Line in LineData:
+            t1 = Line["linewidth"]
+            if not t1 in thin:
+                thin.append(t1)
+            #en if
+            if t1 < thinMin:
+                thinMin = Line["linewidth"] 
+            #end if
+            if t1 > thinMax:
+                thinMax = Line["linewidth"] 
+            #end if
+            # cc += 1
+            # if cc > 100:
+            #     break
+            #end if
+        #next
+        a=0
         for Line in LineData:
             if Line["angle"] == "V":    # 水平線の辞書のリスト
                 VLineData.append(Line)
                 VLineY1.append(Line["y1"])
                 # VLineHeight.append(Line["height"])
-                if Line["linewidth"] > 0.5:     # 太線の水平線の辞書のリスト
+                if Line["linewidth"] == thinMax:     # 太線の水平線の辞書のリスト
                     VBoldLineData.append(Line)
                 #end if
             else:                       # 垂直線の辞書のリスト
                 HLineData.append(Line)
                 HLineX0.append(Line["x0"])
                 HLineY1.append(Line["y1"])
-                if Line["linewidth"] > 0.5:     # 太線の垂直線の辞書のリスト
+                if Line["linewidth"] == thinMax:     # 太線の垂直線の辞書のリスト
                     HBoldLineData.append(Line)
                 #end if
             #end if
@@ -274,9 +338,10 @@ class ChartReader:
         # ChartHBoldLine = []
         # ChartWords = []
 
-        ElementData = {}
+        # ElementData = {}
 
         for i in range(chartN):
+            ElementData = {}
             HLine = ChartHLine[i]
             VLine = ChartVLine[i]
             HBLine = ChartHBoldLine[i]
@@ -319,9 +384,17 @@ class ChartReader:
             for Ct in Char2:
                 text1 += Ct[0]
             #next 
-            print(text1)
-            if EKind in text1:
-
+            # print(text1)
+            EKFlag = False
+            EKind = ""
+            for EK in EKind2:
+                if EK in text1:
+                    EKFlag = True
+                    EKind = EK
+                #end if
+            #next
+            if EKFlag:
+                print(text1)
                 # print(ChartXmin*cc,ChartXmax*cc,ChartYmin*cc,ChartYmax*cc)
 
                 # 表の行のヘッダーとデータの境界線を探す
@@ -332,7 +405,7 @@ class ChartReader:
                         break
                     #end if
                 #next
-                print(Xpoint*cc)
+                # print(Xpoint*cc)
                 
                 # x0が境界線より左側にあるまたは接している水平線のみ抽出
                 HLine2 = []
@@ -363,7 +436,7 @@ class ChartReader:
                 for L in HLine2:
                     if L["y1"]<y01:
                         HLineTerminal.append([Hxmin ,Hxmax])
-                        print(y01*cc ,Hxmin*cc ,Hxmax*cc)
+                        # print(y01*cc ,Hxmin*cc ,Hxmax*cc)
                         y01 = L["y1"]
                         HLinePoint.append(y01)
                         Hxmin = L["x0"]
@@ -431,7 +504,7 @@ class ChartReader:
                     #end if
                 #next
                 Ypoint = HBLinePoint[1]     # コラムのヘッダーとデータの境界のY座標
-                print(Ypoint*cc)
+                # print(Ypoint*cc)
 
                 VLine2 = []
                 VLine2X0 = []
@@ -782,7 +855,7 @@ class ChartReader:
 
                 a=0
 
-                if EKind == "大梁" or EKind == "柱":
+                if EKind == "【大梁】" or EKind == "【基礎大梁】"or EKind == "【柱】":
                     FloorN = 0
                     FloorDataStartRn = []
                     FloorDataEndRn = []
@@ -810,12 +883,12 @@ class ChartReader:
                     if len(pos)>0:
                         FloorDataPos.append(pos)
                     #end if
-                elif EKind == "片持梁" or EKind == "小梁":
+                elif EKind == "【片持梁】" or EKind == "【小梁】" or EKind == "【基礎小梁】":
                     FloorN = 1
                     FloorDataStartRn = [2]
                     FloorDataEndRn = [3]
                     FloorDataPos = [[2,3]]
-                elif EKind == "壁":
+                elif EKind == "【壁】" :
                     FloorN = 1
                     FloorDataStartRn = [1]
                     FloorDataEndRn = [9]
@@ -828,24 +901,24 @@ class ChartReader:
                 ElementCommmonName = []
                 ElementSectionName = []
                 ElementPos = []
-                if EKind == "大梁":
+                if EKind == "【大梁】" or EKind == "【基礎大梁】":
                     for j in range(ElementN):
                         ElementCommmonName.append(ChartData2[0][DataStartCn + j])
                         ElementSectionName.append(ChartData2[1][DataStartCn + j])
                         ElementPos.append(DataStartCn + j)
                     #next
-                elif EKind == "柱":
+                elif EKind == "【柱】":
                     for j in range(ElementN):
                         ElementCommmonName.append(ChartData2[0][DataStartCn + j])
                         ElementPos.append(DataStartCn + j)
                     #next
-                elif EKind == "片持梁" or EKind == "小梁":
+                elif EKind == "【片持梁】" or EKind == "【小梁】" or EKind == "【基礎小梁】":
                     for j in range(ElementN):
                         ElementCommmonName.append(ChartData2[0][DataStartCn + j])
                         ElementSectionName.append(ChartData2[1][DataStartCn + j])
                         ElementPos.append(DataStartCn + j)
                     #next
-                elif EKind == "壁" :
+                elif EKind == "【壁】" :
                     for j in range(ElementN):
                         ElementCommmonName.append(ChartData2[0][DataStartCn + j])
                         ElementPos.append(DataStartCn + j)
@@ -862,7 +935,7 @@ class ChartReader:
                         # ename = ChartData2[RowPos[0]][ep]
                         # Element["符号名"] = ename
 
-                        if EKind == "大梁":
+                        if EKind == "【大梁】" or EKind == "【基礎大梁】":
                             ename = ChartData2[RowPos[0]][ep]
                             FloorName = ChartData2[RowPos[0]][0]
                             Element["符号名"] = ename
@@ -870,19 +943,19 @@ class ChartReader:
                             Element["階数"] = FloorName
                             Element["断面位置"] = ElementSectionName[m]
                             ename2 = ename+":" + ElementSectionName[m]
-                        elif EKind == "柱":
+                        elif EKind == "【柱】":
                             ename = ChartData2[RowPos[0]][ep]
                             FloorName = ChartData2[RowPos[0]][0]
                             Element["符号名"] = ename
                             Element["共通符号名"] = ElementCommmonName[m]
                             Element["階数"] = FloorName
                             ename2 = ename
-                        elif EKind == "片持梁" or EKind == "小梁":
+                        elif EKind == "【片持梁】" or EKind == "【小梁】" or EKind == "【基礎小梁】":
                             ename = ElementCommmonName[m]
                             Element["符号名"] = ename
                             Element["断面位置"] = ElementSectionName[m]
                             ename2 = ename+":" + ElementSectionName[m]
-                        elif EKind == "壁" :
+                        elif EKind == "【壁】" :
                             ename = ElementCommmonName[m]
                             Element["符号名"] = ename
                             ename2 = ename
@@ -921,21 +994,44 @@ class ChartReader:
                         #end if
                     #next
 
-
-                        
-
-                a=0
+                EKElement[EKind] = EKElement[EKind] | ElementData
             #end if
+
         #next
         a=0
         # key = ElementData.keys()
-        return ElementData
+        # return EKind, ElementData
+        if len(EKElement)>0 :
+            return True, EKElement
+        else:
+            return False, EKElement
 
 
 
     #end def
 
-    
+
+    def ReadHeader(self, page, interpreter, device):
+
+        interpreter.process_page(page)
+        # １文字ずつのレイアウトデータを取得
+        layout = device.get_result()
+
+        LineData = []
+        CCount = 0
+        for lt in layout:
+            if isinstance(lt, LTTextBoxHorizontal):  # レイアウトデータうち、LTCharのみを取得
+                char1 = lt.get_text()   # レイアウトデータに含まれる全文字を取得
+                char1 = char1.replace(" ","")
+                LineData.append(char1)
+                CCount += 1
+                if CCount > 5:
+                    break
+            #end if
+        #next
+        return LineData
+
+
 
 #==================================================================================
     #   各ページから１文字ずつの文字と座標データを抽出し、行毎の文字配列および座標配列を戻す関数
@@ -1149,7 +1245,50 @@ class ChartReader:
 
 if __name__ == '__main__':
     
-    pdfname = "構造計算書の部材表.pdf"
+    # pdfname = "構造計算書の部材表.pdf"
     # pdfname = "01(2)Ⅲ構造計算書(2)一貫計算編電算出力.pdf"
-    ElementData = extract_lines_from_pdf(pdfname)
+    # pdfname = "03sawarabi 京都六角 計算書 (事前用).pdf"
+    pdfname = "03構造計算書（部材リストのみ）.pdf"
+    
+    # pdfname = "02一貫計算書（一部）.pdf"
+    ElementData = Read_Elements_from_pdf(pdfname)
+    filename = os.path.splitext(pdfname)[0] + "_部材リスト" + ".csv"
+
+    with open(filename, 'w') as f:
+        writer = csv.writer(f)
+
+        ElementKind = ElementData.keys()
+        for Kind in ElementKind:
+            Kind2 = []
+            Kind2.append(Kind)  # 部材の種類
+            writer.writerow(Kind2)
+
+            Elements = ElementData[Kind]    # 同じ部材種類のデータ
+            RowNames = list(Elements.keys())        # 符号名：断面位置
+            Edata = Elements[RowNames[0]]
+            ColumnNames =list(Edata.keys())
+            cnames =["符号名：断面"] + ColumnNames
+            writer.writerow(cnames)
+
+            for RowName in RowNames:
+                data = Elements[RowName]
+                dlist = list(data.keys())
+                cdata = [RowName]
+                for ColumnName in ColumnNames:
+                    if ColumnName in dlist:
+                        cdata.append(data[ColumnName])
+                    else:
+                        cdata.append("")
+                    #end if
+                #next
+                writer.writerow(cdata)
+            #next
+        #next
+    #end with
     a=0
+            
+
+
+    # with open('data/temp/sample_writer_row.csv', 'a') as f:
+        
+    #     writer.writerow(['X', 'Y', 'Z'])
