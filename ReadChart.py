@@ -143,10 +143,46 @@ class ChartReader:
         for f in DataFlag1:
             DataFlag2 = DataFlag2 and f
         #next
+        DataFlag3 = False
+        for EK in EKind2:
+            DataFlag3 = False
+            for Line in LineText:
+                if EK in Line :
+                    DataFlag3 = True
+                    break
+                #end if
+            #next 
+            DataFlag1.append(DataFlag)
+        #next
         if not DataFlag2 or len(LineData)==0:
             print("")
             return False,{}
+        #end if
 
+        ChartYmaxStart = 0.0
+        DataFlag3 = False
+        for EK in EKind2:
+            DataFlag3 = False
+            i = -1
+            for Line in LineText:
+                i += 1
+                if EK in Line :
+                    DataFlag3 = True
+                    if ChartYmaxStart == 0:
+                        ChartYmaxStart = CharData[i][0][3]
+                    #end if
+                    break
+                #end if
+            #next 
+            if DataFlag3 :
+                break
+            #end if
+        #next
+        if not DataFlag3 :
+            print("")
+            return False,{}
+        #end if
+        
         HLineData = []      # すべての水平線の辞書のリスト
         HLineX0 = []        # すべての水平線のx0のリスト
         HLineY1 = []        # すべての水平線のy1のリスト
@@ -178,19 +214,21 @@ class ChartReader:
         #next
         a=0
         for Line in LineData:
-            if Line["angle"] == "V":    # 水平線の辞書のリスト
-                VLineData.append(Line)
-                VLineY1.append(Line["y1"])
-                # VLineHeight.append(Line["height"])
-                if Line["linewidth"] == thinMax:     # 太線の水平線の辞書のリスト
-                    VBoldLineData.append(Line)
-                #end if
-            else:                       # 垂直線の辞書のリスト
-                HLineData.append(Line)
-                HLineX0.append(Line["x0"])
-                HLineY1.append(Line["y1"])
-                if Line["linewidth"] == thinMax:     # 太線の垂直線の辞書のリスト
-                    HBoldLineData.append(Line)
+            if Line["y1"] < ChartYmaxStart:
+                if Line["angle"] == "V":    # 水平線の辞書のリスト
+                    VLineData.append(Line)
+                    VLineY1.append(Line["y1"])
+                    # VLineHeight.append(Line["height"])
+                    if Line["linewidth"] == thinMax:     # 太線の水平線の辞書のリスト
+                        VBoldLineData.append(Line)
+                    #end if
+                else:                       # 垂直線の辞書のリスト
+                    HLineData.append(Line)
+                    HLineX0.append(Line["x0"])
+                    HLineY1.append(Line["y1"])
+                    if Line["linewidth"] == thinMax:     # 太線の垂直線の辞書のリスト
+                        HBoldLineData.append(Line)
+                    #end if
                 #end if
             #end if
         #next
@@ -982,19 +1020,21 @@ class ChartReader:
                             a=0
                             Element[pname2] = ChartData2[rp][ep]
                         #next
-                        if "," in ename :
-                            enamed = ename.split(",")
-                            for name in enamed:
-                                Element["符号名"] = name
-                                if ":" in ename2 :
-                                    ename2 = name + ":"+Element["断面位置"]
-                                else:
-                                    ename2 = name
-                                #end if
+                        if ename.replace(" ","") != "":
+                            if "," in ename :
+                                enamed = ename.split(",")
+                                for name in enamed:
+                                    Element["符号名"] = name
+                                    if ":" in ename2 :
+                                        ename2 = name + ":"+Element["断面位置"]
+                                    else:
+                                        ename2 = name
+                                    #end if
+                                    ElementData[ename2] = Element
+                                #next
+                            else:
                                 ElementData[ename2] = Element
-                            #next
-                        else:
-                            ElementData[ename2] = Element
+                            #end if
                         #end if
                     #next
 
@@ -1037,7 +1077,7 @@ class ChartReader:
 
 
 
-#==================================================================================
+    #==================================================================================
     #   各ページから１文字ずつの文字と座標データを抽出し、行毎の文字配列および座標配列を戻す関数
     #==================================================================================
 
@@ -1064,7 +1104,7 @@ class ChartReader:
         rp = 3
         for lt in layout:
             # if isinstance(lt, LTLine):  # レイアウトデータうち、LTLineのみを取得
-            if isinstance(lt, LTLine) or isinstance(lt, LTCurve):  # レイアウトデータうち、LTLineのみを取得
+            if isinstance(lt, LTLine) or isinstance(lt, LTCurve):  # レイアウトデータうち、LTLineとLTCurveを取得
                 lineDic = {}
                 lineDic["x0"] =round(lt.x0,rp)
                 lineDic["x1"] = round(lt.x1,rp)
@@ -1075,14 +1115,20 @@ class ChartReader:
                 lineDic["linewidth"] = round(lt.linewidth,rp)
                 lineDic["pts"] = lt.pts
                 if round(lt.x0,rp) == round(lt.x1,rp) :
-                    lineAngle = "V"
+                    lineDic["angle"] = "V"
+                    LineData.append(lineDic)
                 elif round(lt.y0,rp) == round(lt.y1,rp) :
-                    lineAngle = "H"
-                else:
-                    lineAngle = "N"
+                    lineDic["angle"] = "H"
+                    LineData.append(lineDic)
+                # if round(lt.x0,rp) == round(lt.x1,rp) :
+                #     lineAngle = "V"
+                # elif round(lt.y0,rp) == round(lt.y1,rp) :
+                #     lineAngle = "H"
+                # else:
+                #     lineAngle = "N"
                 #end if
-                lineDic["angle"] = lineAngle
-                LineData.append(lineDic)
+                # lineDic["angle"] = lineAngle
+                # LineData.append(lineDic)
             #end if
             if isinstance(lt, LTRect):
                 RectDic = {}
@@ -1303,8 +1349,8 @@ if __name__ == '__main__':
     
     # pdfname = "構造計算書の部材表.pdf"
     # pdfname = "01(2)Ⅲ構造計算書(2)一貫計算編電算出力.pdf"
-    # pdfname = "03sawarabi 京都六角 計算書 (事前用).pdf"
-    pdfname = "03構造計算書（部材リストのみ）.pdf"
+    pdfname = "03sawarabi 京都六角 計算書 (事前用).pdf"
+    # pdfname = "03構造計算書（部材リストのみ）.pdf"
     
     # pdfname = "02一貫計算書（一部）.pdf"
     ElementData = Read_Elements_from_pdf(pdfname)
