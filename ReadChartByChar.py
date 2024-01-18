@@ -1,11 +1,14 @@
 # from pdfminer.layout import LAParams, LTLine, LTTextBoxHorizontal
 from pdfminer.layout import LAParams, LTTextContainer, LTContainer, LTTextBoxHorizontal, LTTextLine, LTChar,LTLine,LTRect
-from pdfminer.layout import LTFigure,LTCurve
+from pdfminer.layout import LTFigure,LTCurve,LTImage
 from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
 from pdfminer.converter import PDFPageAggregator
 from pdfminer.pdfpage import PDFPage
 from io import StringIO
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy import signal
+
 import sys,csv,os
 # pip install reportlab
 from reportlab.pdfgen import canvas
@@ -13,21 +16,26 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.units import mm
+from ja_cvu_normalizer.ja_cvu_normalizer import JaCvuNormalizer
 
 cc = 25.4/72.0
 
 def Read_Elements_from_pdf(pdf_path):
-    laparams = LAParams()
+    laparams = LAParams(line_margin=0.1,
+                word_margin=0.1,
+                boxes_flow=0.5,
+                detect_vertical=False,
+                all_texts=True)
     
     # PDFMinerのツールの準備
     resourceManager = PDFResourceManager()
     outfp = StringIO()
     # PDFから単語を取得するためのデバイス
-    # device = PDFPageAggregator(resourceManager, laparams=LAParams())
+    device = PDFPageAggregator(resourceManager, laparams=LAParams())
     # PDFから１文字ずつを取得するためのデバイス
     device2 = PDFPageAggregator(resourceManager)
 
-    # interpreter = PDFPageInterpreter(resourceManager, device)
+    interpreter = PDFPageInterpreter(resourceManager, device)
     interpreter2 = PDFPageInterpreter(resourceManager, device2)
     
     fp = open(pdf_path, 'rb')
@@ -35,7 +43,7 @@ def Read_Elements_from_pdf(pdf_path):
     PageKind = ["構造計算書","断面リスト"]
     # EKnd = ["壁"]
     # EKnd = ["小梁","壁"]
-    # EKnd = ["【大梁】","【基礎大梁】","【柱】","【片持梁】","【小梁】","【基礎小梁】","【壁】"]
+    # EKnd = ["【大梁】","【基礎大梁】","【柱】","【片持梁】","【小梁】","【基礎小梁】","【壁】"]【⼤梁】 (1/4)
     EKnd = ["【大梁】","【基礎大梁】","【柱】"]
     # EKnd = ["大梁","柱"]
     for EK in EKnd:
@@ -51,7 +59,7 @@ def Read_Elements_from_pdf(pdf_path):
         # interpreter.process_page(page)
         interpreter2.process_page(page)
         
-        dflag, element = CR.ChartDevider(interpreter2 ,device2 ,page,PageKind,EKnd)
+        dflag, element = CR.ChartDevider(interpreter ,device ,interpreter2 ,device2 ,page,PageKind,EKnd)
         if dflag :
             for EK in EKnd:
                 if len(element[EK])>0:
@@ -97,7 +105,7 @@ class ChartReader:
         pdfmetrics.registerFont(TTFont(self.fontname2, IPAEXG_TTF))
     #end def
 
-    def ChartDevider(self,interpreter2 ,device2 ,page,PageKind,EKind2):
+    def ChartDevider(self,interpreter ,device,interpreter2 ,device2 ,page,PageKind,EKind2):
         """
         ・すべての水平線および垂直線のデータを辞書にしてリストを作成
         ・その際、それらの太線のみのリストも作成
@@ -122,17 +130,22 @@ class ChartReader:
         # layout = device.get_result()
         # interpreter2.process_page(page)
         # layout2 = device2.get_result()
-
-        LineText , CharData, LineData =  self.MakeChar(page, interpreter2, device2)
+        # LineData =  self.MakeChar2(page, interpreter, device)
+        
+        LineText , CharData, LineData ,PaperXSize, PaperYSize =  self.MakeChar(page, interpreter2, device2)
         if len(CharData)<10:
             print("")
             return False,{}
-        
+        #end if
+
+        # 異体字正規化モジュール
+        ja_cvu_normalizer = JaCvuNormalizer()
+                        
         DataFlag1 = []
         for Pkind in PageKind:
             DataFlag = False
             for Line in LineText:
-                if Pkind in Line :
+                if Pkind in ja_cvu_normalizer.normalize(Line) :
                     DataFlag = True
                     break
                 #end if
@@ -147,7 +160,7 @@ class ChartReader:
         for EK in EKind2:
             DataFlag3 = False
             for Line in LineText:
-                if EK in Line :
+                if EK in ja_cvu_normalizer.normalize(Line) :
                     DataFlag3 = True
                     break
                 #end if
@@ -158,6 +171,254 @@ class ChartReader:
             print("")
             return False,{}
         #end if
+        
+        y0 = []
+        charsize = []
+        charsizeMin = 1000.0
+        for char in CharData:
+            y0.append(char[0][4])
+            s = char[0][4]-char[0][3]
+            charsize.append(s)
+            if s < charsizeMin:
+                charsizeMin = s
+            #end if
+        #next
+        y0Array = np.array(y0)      # リストをNumpyの配列に変換
+        index1 = np.argsort(-y0Array)    # 縦の線をHeightの値で降順にソートするインデックスを取得
+        CharData2 = []                     # 高順位並び替えたLineデータ
+        for i in range(len(index1)):
+            CharData2.append(CharData[index1[i]])
+        #next
+        CharData = CharData2
+
+        PageTextData = []
+        PageText = []
+        PageTextYm = []
+        rp = 3
+        for CharLine in CharData:
+            LineData = []
+            LineText = ""
+            hmax = 0.0
+            y1max = -10000.0
+            y0min = 10000.0
+            x1max = -10000.0
+            x0min = 10000.0
+            for Char in CharLine:
+                cdata = {}
+                cdata["text"] = Char[0]
+                cdata["x0"] = round(Char[1],rp)
+                cdata["x1"] = round(Char[2],rp)
+                cdata["y0"] = round(Char[3],rp)
+                cdata["y1"] = round(Char[4],rp)
+                cdata["height"] = round(abs(Char[4] - Char[3]),rp)
+                cdata["width"] = round(abs(Char[2] - Char[1]),rp)
+                LineData.append(cdata)
+                LineText += cdata["text"]
+                if hmax < cdata["height"]:
+                    hmax = cdata["height"]
+                #end if
+                if y1max < cdata["y1"]:
+                    y1max = cdata["y1"]
+                #end if
+                if y0min > cdata["y0"]:
+                    y0min = cdata["y0"]
+                #end if
+                if x1max < cdata["x1"]:
+                    x1max = cdata["x1"]
+                #end if
+                if x0min > cdata["x0"]:
+                    x0min = cdata["x0"]
+                #end if
+            #next
+            PageTextData.append(LineData)
+            t1 = {}
+            t1["text"] = LineText
+            t1["x0"] = x0min
+            t1["x1"] = x1max
+            t1["y0"] = y0min
+            t1["y1"] = y1max
+            t1["height"] = y1max - y0min
+            t1["width"] = x1max - x0min
+            PageText.append(t1)
+            PageTextYm.append(round((y1max+y0min)/2, rp))
+        #next
+        a=0
+        PageWordData = []
+        for LineData in PageTextData:
+            LineWordData = []
+            word = []
+            text1 = ""
+            pit = 0
+            for char in LineData:
+                if pit == 0:
+                    word = []
+                    pit = char["width"]
+                    x0 = char["x0"]
+                    x1 = char["x1"]
+                    y0 = char["y0"]
+                    y1 = char["y1"]
+                    word.append(char)
+                    text1 += char["text"]
+                else:
+                    if char["x0"]-x1 < pit:
+                        word.append(char)
+                        text1 += char["text"]
+                        x1 = char["x1"]
+                    else:
+                        data = {}
+                        data["text"] = ja_cvu_normalizer.normalize(text1)
+                        data["x0"] = x0
+                        data["x1"] = x1
+                        data["xm"] = round((x0 + x1)/2.0,rp)
+                        data["width"] = round(x1 - x0,rp)
+                        data["y0"] = y0
+                        data["y1"] = y1
+                        data["ym"] = round((y0 + y1)/2.0,rp)
+                        data["height"] = round(y1 - y0,rp)
+                        data["char"] = word
+                        LineWordData.append(data)
+                        word = []
+                        text1 = ""
+                        pit = char["width"]
+                        x0 = char["x0"]
+                        x1 = char["x1"]
+                        y0 = char["y0"]
+                        y1 = char["y1"]
+                        word.append(char)
+                        text1 += char["text"]
+                    #end if
+                #end if
+            #next
+            if len(word)>0:
+                data = {}
+                data["text"] = ja_cvu_normalizer.normalize(text1)
+                data["x0"] = x0
+                data["x1"] = x1
+                data["xm"] = round((x0 + x1)/2.0,rp)
+                data["width"] = round(x1 - x0,rp)
+                data["y0"] = y0
+                data["y1"] = y1
+                data["ym"] = round((y0 + y1)/2.0,rp)
+                data["height"] = round(y1 - y0,rp)
+                data["char"] = word
+                LineWordData.append(data)
+            #end if
+            if len(LineWordData)>0 :
+                PageWordData.append(LineWordData)
+            #end if
+            a=0
+        #next
+        a=0
+        # print(ja_cvu_normalizer.normalize(text))
+        # -> 高橋
+        
+        # PageText
+        # 'text':'Super Build/SS7 Ver. 1. 1. 1.18aUserID:124080 '
+        # 'x0':35.0
+        # 'x1':566.925
+        # 'y0':781.39
+        # 'y1':789.35
+        # 'height':7.960000000000036
+        # 'width':531.925
+
+        # for (LineText ,ym ,LineWordData) in zip(PageText ,PageTextYm ,PageWordData):
+        TableInfo = []
+        for pi, LineWordData in enumerate(PageWordData):
+            a=0
+            for pj,word in enumerate(LineWordData):
+                # flag = False
+                for EK in EKind2:
+                    if EK in word["text"]:
+                        # flag = True
+                        d1 = {}
+                        d1["row"] = pi
+                        d1["col"] = pj
+                        d1["EK"] = EK
+                        d1["word"] = word
+                        TableInfo.append(d1)
+                    #end if
+                #end if
+                # if flag :
+                #     TableInfo.append(word)
+                # #end if
+            #next
+        #next
+        a=0
+        table_N = len(TableInfo)
+        tableMax = []
+        for i in range(table_N):
+            x0 = TableInfo[i]["word"]["x0"]
+            x1 = TableInfo[i]["word"]["x1"]
+            y0 = TableInfo[i]["word"]["y0"]
+            y1 = TableInfo[i]["word"]["y1"]
+            ymax = y1
+            ymin = 0
+            xmax = PaperXSize
+            xmin = x0
+            flag1 = False
+            flag2 = False
+            for j in range(i,table_N):
+                if i != j :
+                    xx0 = TableInfo[j]["word"]["x0"]
+                    xx1 = TableInfo[j]["word"]["x1"]
+                    yy0 = TableInfo[j]["word"]["y0"]
+                    yy1 = TableInfo[j]["word"]["y1"]
+                    
+                    if xx0 < x1 :
+                        if ymin>yy1 and not flag1 :
+                            ymin = yy1
+                            flag1 = True
+                        #end if
+                    else:
+                        if xmax > xx0 and not flag2:
+                            xmax = xx0
+                            flag2 = True
+                        #end if
+                    #end if
+                #end if
+                if flag1 and flag2 :
+                    break
+                #end if
+            #next
+            dic = {}
+            dic["xmin"] = xmin
+            dic["xmax"] = xmax
+            dic["ymin"] = ymin
+            dic["ymax"] = ymax
+            tableMax.append(dic)
+        #next
+        a=0
+            
+                            
+            
+
+
+
+
+            
+
+                
+                
+                
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
         ChartYmaxStart = 0.0
         DataFlag3 = False
@@ -233,6 +494,9 @@ class ChartReader:
             #end if
         #next
 
+
+
+
         # WordData = []           # 横書きテキストの辞書のリスト
         # for lt in layout:
         #     if isinstance(lt, LTTextBoxHorizontal):  # レイアウトデータうち、LTLineのみを取得
@@ -261,6 +525,138 @@ class ChartReader:
             HLineData2.append(HLineData[index1[i]])
         #next
         HLineData = HLineData2
+
+        HH = []
+        for Line in HLineData:
+            if not(Line["y0"] in HH):
+                HH.append(Line["y0"])
+            #end if
+        #next
+        
+        HH.sort(reverse=True)
+        HLineAll = []
+        HLinMimX0 = []
+        for H in HH:
+            HLineAll.append([])
+            HLinMimX0.append([])
+        #next
+        LengthMin = 5.0
+        for Line in HLineData:
+            for i in range(len(HH)):
+                if Line["y0"] == HH[i]:
+                    if Line["width"]>=LengthMin:
+                        HLineAll[i].append(Line)
+                        HLinMimX0[i].append(Line["x0"])
+                    #end if
+                #end if
+            #next
+        #next
+        HLineAll2 = []
+        HLineMinX02 = []
+        for i,HLines in enumerate(HLineAll):
+            if len(HLines)>0 :
+                HLineAll2.append(HLines)
+                HLineMinX02.append(HLinMimX0[i])
+            #end if
+        #next
+        HLineAll = HLineAll2 
+        HLinMimX0 = HLineMinX02
+
+        a=0
+        NewHLines = []
+        for i,HLines in enumerate(HLineAll):
+            HMinX0 = HLinMimX0[i]
+            if len(HMinX0)>1:
+                HLineArray = np.array(HMinX0)
+                index1 = np.argsort(HLineArray)
+                HLines2 = []
+                HMinX02 = []
+                for i in range(len(index1)):
+                    HLines2.append(HLines[index1[i]])
+                    HMinX02.append(HMinX0[index1[i]])
+                #next
+                HLines1 = HLines2
+                HMinX0 = HMinX02
+                SameHLines = []
+                HLines3 = HLines1
+                while True:
+                    L0 = HLines3[0]
+                    x0 = L0["x0"]
+                    x1 = L0["x1"]
+                    Line1 = []
+                    Line2 = []
+                    for L1 in HLines3:
+                        xx0 = L1["x0"]
+                        xx1 = L1["x1"]
+                        if (xx0 >= x0 and xx0<= x1):
+                            Line1.append(L1)
+                            if xx1>x1:
+                                x1 = xx1
+                            #end if
+                        else:
+                            Line2.append(L1)
+                        #end if
+                    #next
+                    SameHLines.append(Line1)
+                    if len(Line2) == 0:
+                        break
+                    else:
+                        HLines3 = Line2
+                    #end if
+                #end while
+                
+                for Lines in SameHLines:
+                    NewLine = Lines[0]
+                    xmin = NewLine["x0"]
+                    xmax = NewLine["x1"]
+                    for L in Lines:
+                        if L["x0"] < xmin:
+                            xmin = L["x0"]
+                        #end if
+                        if L["x1"] > xmax:
+                            xmax = L["x1"]
+                        #end if
+                    #next
+                    NewLine["x0"] = xmin 
+                    NewLine["x1"] = xmax
+                    NewLine["width"] = xmax - xmin
+                    NewHLines.append(NewLine)
+                #next
+                a=0
+            else:
+                NewHLines.append(HLines)
+            #end if
+        #next
+
+
+
+
+
+            #end if
+
+
+
+
+        VV = []
+        for Line in VLineData:
+            if not(Line["x0"] in VV):
+                VV.append(Line["x0"])
+            #end if
+        #next
+        VV.sort()
+        VLineAll = []
+        for V in VV:
+            VLineAll.append([])
+        #next
+        for Line in VLineData:
+            for i in range(len(VV)):
+                if Line["x0"] == VV[i]:
+                    VLineAll[i].append(Line)
+                #end if
+            #next
+        #next    
+        a=0
+
 
         # 垂直線をy1が高い順に並び替え
         VLineArray = np.array(VLineY1)      # リストをNumpyの配列に変換
@@ -896,6 +1292,17 @@ class ChartReader:
 
 
                 a=0
+                # FloorN = 0
+                # FloorDataStartRn = []
+                # FloorDataEndRn = []
+                # FloorDataPos = []
+                # pos = []
+                # DPos = 0
+                # for j in range(RowsN):
+                #     if ChartData2[j][0].replace(" ","") == "" :
+                #         DPos += 1
+                #     else:
+
 
                 if EKind == "【大梁】" or EKind == "【基礎大梁】"or EKind == "【柱】":
                     FloorN = 0
@@ -1084,27 +1491,71 @@ class ChartReader:
     def MakeChar(self, page, interpreter, device):
 
         interpreter.process_page(page)
-        # １文字ずつのレイアウトデータを取得
+        # １文字ずつのレイアウトデータを取得　np.full((2, 3), 0.123))
         layout = device.get_result()
-
+        paperXSize = layout.x1
+        paperYSize = layout.y1
         CharData = []
+        # xsize = int(layout.bbox[2])+1
+        # ysize = int(layout.bbox[3])+1
+        # # map = np.zeros((ysize,xsize,3))
+        # map = np.full((ysize,xsize,3),255)
+        # map2 = np.zeros((ysize,xsize))
         for lt in layout:
             if isinstance(lt, LTChar):  # レイアウトデータうち、LTCharのみを取得
                 char1 = lt.get_text()   # レイアウトデータに含まれる全文字を取得
                 m1 = lt.matrix
                 if m1[1] == 0.0 :  # 回転していない文字のみを抽出
                     CharData.append([char1, lt.x0, lt.x1, lt.y0, lt.y1,lt.matrix])
+                    # j0 = int(round(lt.x0,0))
+                    # j1 = int(round(lt.x1,0))
+                    # i0 = int(round(lt.y0,0))
+                    # i1 = int(round(lt.y1,0))
+                    # for i in range(i0,i1):
+                    #     for j in range(j0,j1):
+                    #         map[ysize- i,j ,0] = 255
+                    #         map[ysize- i,j ,1] = 0
+                    #         map[ysize- i,j ,2] = 0
+                    #     #next 
+                    #     map2[ysize- i,j]=1
+                    # #next
                 #end if
             #end if
         #next
+        # X = np.random.randint(256, size=(10, 10))
+
+        # fig = plt.figure(figsize=(8, 6))
+        # plt.imshow(map)
+        # # plt.title("Plot 2D array")
+        # plt.show()
+
+        # for i in range(ysize):
+        #     j=0
+        #     flag = True
+        #     space = []
+        #     while flag:
+        #         if map[i,j,0]==255 and map[i,j,0]==255 and map[i,j,0]==255:
+        #             space.append((i))
+
+
+
+        # f = np.array([
+        # [0,0,0],
+        # [0,0,0],
+        # [0,1,0]
+        # ])
+        # f = np.ones((5,50))
+        # map2 = np.pad(signal.convolve2d(map, f, mode='valid'), 1)
+        # plt.imshow(map2) 
 
 
         LineData = []
         RectData = []
+        CurveData = []
         rp = 3
         for lt in layout:
             # if isinstance(lt, LTLine):  # レイアウトデータうち、LTLineのみを取得
-            if isinstance(lt, LTLine) or isinstance(lt, LTCurve):  # レイアウトデータうち、LTLineとLTCurveを取得
+            if isinstance(lt, LTLine):  # レイアウトデータうち、LTLineとLTCurveを取得
                 lineDic = {}
                 lineDic["x0"] =round(lt.x0,rp)
                 lineDic["x1"] = round(lt.x1,rp)
@@ -1120,16 +1571,32 @@ class ChartReader:
                 elif round(lt.y0,rp) == round(lt.y1,rp) :
                     lineDic["angle"] = "H"
                     LineData.append(lineDic)
-                # if round(lt.x0,rp) == round(lt.x1,rp) :
-                #     lineAngle = "V"
-                # elif round(lt.y0,rp) == round(lt.y1,rp) :
-                #     lineAngle = "H"
-                # else:
-                #     lineAngle = "N"
                 #end if
-                # lineDic["angle"] = lineAngle
-                # LineData.append(lineDic)
             #end if
+            if isinstance(lt, LTCurve):
+                lineDic = {}
+                lineDic["x0"] =round(lt.x0,rp)
+                lineDic["x1"] = round(lt.x1,rp)
+                lineDic["y0"] = round(lt.y0,rp)
+                lineDic["y1"] = round(lt.y1,rp)
+                lineDic["height"] = round(lt.height,rp)
+                lineDic["width"] = round(lt.width,rp)
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                if lineDic["height"] == 0.0 and lineDic["width"] > 0.0 :
+                    # lineDic["y0"] = round(lt.y1,rp)
+                    lineDic["angle"] = "H"
+                    CurveData.append(lineDic)
+                elif lineDic["height"] == 0.0 and lineDic["width"] > 0.0 :
+                    # lineDic["x0"] = round(lt.x1,rp)
+                    lineDic["angle"] = "V"
+                    CurveData.append(lineDic)
+                #end if
+            #end if
+
+            if isinstance(lt, LTImage):
+                a=0
+
             if isinstance(lt, LTRect):
                 RectDic = {}
                 RectDic["x0"] = lt.x0
@@ -1138,53 +1605,53 @@ class ChartReader:
                 RectDic["y1"] = lt.y1
                 RectData.append(RectDic)
 
-                # lineDic = {}
-                # lineDic["x0"] =round(lt.x0,rp)
-                # lineDic["x1"] = round(lt.x1,rp)
-                # lineDic["y0"] = round(lt.y0,rp)
-                # lineDic["y1"] = round(lt.y0,rp)
-                # lineDic["height"] = 0.0
-                # lineDic["width"] = round(lt.width,rp)
-                # lineDic["linewidth"] = round(lt.linewidth,rp)
-                # lineDic["pts"] = lt.pts
-                # lineDic["angle"] = "H"
-                # LineData.append(lineDic)
+                lineDic = {}
+                lineDic["x0"] =round(lt.x0,rp)
+                lineDic["x1"] = round(lt.x1,rp)
+                lineDic["y0"] = round(lt.y0,rp)
+                lineDic["y1"] = round(lt.y0,rp)
+                lineDic["height"] = 0.0
+                lineDic["width"] = round(lt.width,rp)
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                lineDic["angle"] = "H"
+                LineData.append(lineDic)
 
-                # lineDic = {}
-                # lineDic["x0"] =round(lt.x0,rp)
-                # lineDic["x1"] = round(lt.x1,rp)
-                # lineDic["y0"] = round(lt.y1,rp)
-                # lineDic["y1"] = round(lt.y1,rp)
-                # lineDic["height"] = 0.0
-                # lineDic["width"] = round(lt.width,rp)
-                # lineDic["linewidth"] = round(lt.linewidth,rp)
-                # lineDic["pts"] = lt.pts
-                # lineDic["angle"] = "H"
-                # LineData.append(lineDic)
+                lineDic = {}
+                lineDic["x0"] =round(lt.x0,rp)
+                lineDic["x1"] = round(lt.x1,rp)
+                lineDic["y0"] = round(lt.y1,rp)
+                lineDic["y1"] = round(lt.y1,rp)
+                lineDic["height"] = 0.0
+                lineDic["width"] = round(lt.width,rp)
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                lineDic["angle"] = "H"
+                LineData.append(lineDic)
 
-                # lineDic = {}
-                # lineDic["x0"] =round(lt.x0,rp)
-                # lineDic["x1"] = round(lt.x0,rp)
-                # lineDic["y0"] = round(lt.y0,rp)
-                # lineDic["y1"] = round(lt.y1,rp)
-                # lineDic["height"] = round(lt.height,rp)
-                # lineDic["width"] = 0.0
-                # lineDic["linewidth"] = round(lt.linewidth,rp)
-                # lineDic["pts"] = lt.pts
-                # lineDic["angle"] = "V"
-                # LineData.append(lineDic)
+                lineDic = {}
+                lineDic["x0"] =round(lt.x0,rp)
+                lineDic["x1"] = round(lt.x0,rp)
+                lineDic["y0"] = round(lt.y0,rp)
+                lineDic["y1"] = round(lt.y1,rp)
+                lineDic["height"] = round(lt.height,rp)
+                lineDic["width"] = 0.0
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                lineDic["angle"] = "V"
+                LineData.append(lineDic)
 
-                # lineDic = {}
-                # lineDic["x0"] =round(lt.x1,rp)
-                # lineDic["x1"] = round(lt.x1,rp)
-                # lineDic["y0"] = round(lt.y0,rp)
-                # lineDic["y1"] = round(lt.y1,rp)
-                # lineDic["height"] = round(lt.height,rp)
-                # lineDic["width"] = 0.0
-                # lineDic["linewidth"] = round(lt.linewidth,rp)
-                # lineDic["pts"] = lt.pts
-                # lineDic["angle"] = "V"
-                # LineData.append(lineDic)
+                lineDic = {}
+                lineDic["x0"] =round(lt.x1,rp)
+                lineDic["x1"] = round(lt.x1,rp)
+                lineDic["y0"] = round(lt.y0,rp)
+                lineDic["y1"] = round(lt.y1,rp)
+                lineDic["height"] = round(lt.height,rp)
+                lineDic["width"] = 0.0
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                lineDic["angle"] = "V"
+                LineData.append(lineDic)
             #end if
         #next
 
@@ -1321,7 +1788,273 @@ class ChartReader:
             t1.append(tt2)
         #end if
 
-        return t1 , CharData5, LineData
+        return t1 , CharData5, LineData, paperXSize, paperYSize
+    #end def
+    #*********************************************************************************
+
+    #==================================================================================
+    #   各ページから１文字ずつの文字と座標データを抽出し、行毎の文字配列および座標配列を戻す関数
+    #==================================================================================
+
+    def MakeChar2(self, page, interpreter, device):
+
+        interpreter.process_page(page)
+        # １文字ずつのレイアウトデータを取得
+        layout = device.get_result()
+
+        # CharData = []
+        # for lt in layout:
+        #     if isinstance(lt, LTChar):  # レイアウトデータうち、LTCharのみを取得
+        #         char1 = lt.get_text()   # レイアウトデータに含まれる全文字を取得
+        #         m1 = lt.matrix
+        #         if m1[1] == 0.0 :  # 回転していない文字のみを抽出
+        #             CharData.append([char1, lt.x0, lt.x1, lt.y0, lt.y1,lt.matrix])
+        #         #end if
+        #     #end if
+        # #next
+
+
+        LineData = []
+        RectData = []
+        CurveData = []
+        rp = 3
+        
+        for lt in layout:
+            # if isinstance(lt, LTLine):  # レイアウトデータうち、LTLineのみを取得
+            if isinstance(lt, LTLine):  # レイアウトデータうち、LTLineとLTCurveを取得
+                lineDic = {}
+                lineDic["x0"] =round(lt.x0,rp)
+                lineDic["x1"] = round(lt.x1,rp)
+                lineDic["y0"] = round(lt.y0,rp)
+                lineDic["y1"] = round(lt.y1,rp)
+                lineDic["height"] = round(lt.height,rp)
+                lineDic["width"] = round(lt.width,rp)
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                if round(lt.x0,rp) == round(lt.x1,rp) :
+                    lineDic["angle"] = "V"
+                    LineData.append(lineDic)
+                elif round(lt.y0,rp) == round(lt.y1,rp) :
+                    lineDic["angle"] = "H"
+                    LineData.append(lineDic)
+                #end if
+            #end if
+            if isinstance(lt, LTCurve):
+                lineDic = {}
+                lineDic["x0"] =round(lt.x0,rp)
+                lineDic["x1"] = round(lt.x1,rp)
+                lineDic["y0"] = round(lt.y0,rp)
+                lineDic["y1"] = round(lt.y1,rp)
+                lineDic["height"] = round(lt.height,rp)
+                lineDic["width"] = round(lt.width,rp)
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                if lineDic["height"] == 0.0 and lineDic["width"] > 0.0 :
+                    # lineDic["y0"] = round(lt.y1,rp)
+                    lineDic["angle"] = "H"
+                    CurveData.append(lineDic)
+                elif lineDic["height"] == 0.0 and lineDic["width"] > 0.0 :
+                    # lineDic["x0"] = round(lt.x1,rp)
+                    lineDic["angle"] = "V"
+                    CurveData.append(lineDic)
+                #end if
+            #end if
+
+            if isinstance(lt, LTImage):
+                a=0
+
+            if isinstance(lt, LTRect):
+                RectDic = {}
+                RectDic["x0"] = lt.x0
+                RectDic["x1"] = lt.x1
+                RectDic["y0"] = lt.y0
+                RectDic["y1"] = lt.y1
+                RectData.append(RectDic)
+
+                lineDic = {}
+                lineDic["x0"] =round(lt.x0,rp)
+                lineDic["x1"] = round(lt.x1,rp)
+                lineDic["y0"] = round(lt.y0,rp)
+                lineDic["y1"] = round(lt.y0,rp)
+                lineDic["height"] = 0.0
+                lineDic["width"] = round(lt.width,rp)
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                lineDic["angle"] = "H"
+                LineData.append(lineDic)
+
+                lineDic = {}
+                lineDic["x0"] =round(lt.x0,rp)
+                lineDic["x1"] = round(lt.x1,rp)
+                lineDic["y0"] = round(lt.y1,rp)
+                lineDic["y1"] = round(lt.y1,rp)
+                lineDic["height"] = 0.0
+                lineDic["width"] = round(lt.width,rp)
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                lineDic["angle"] = "H"
+                LineData.append(lineDic)
+
+                lineDic = {}
+                lineDic["x0"] =round(lt.x0,rp)
+                lineDic["x1"] = round(lt.x0,rp)
+                lineDic["y0"] = round(lt.y0,rp)
+                lineDic["y1"] = round(lt.y1,rp)
+                lineDic["height"] = round(lt.height,rp)
+                lineDic["width"] = 0.0
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                lineDic["angle"] = "V"
+                LineData.append(lineDic)
+
+                lineDic = {}
+                lineDic["x0"] =round(lt.x1,rp)
+                lineDic["x1"] = round(lt.x1,rp)
+                lineDic["y0"] = round(lt.y0,rp)
+                lineDic["y1"] = round(lt.y1,rp)
+                lineDic["height"] = round(lt.height,rp)
+                lineDic["width"] = 0.0
+                lineDic["linewidth"] = round(lt.linewidth,rp)
+                lineDic["pts"] = lt.pts
+                lineDic["angle"] = "V"
+                LineData.append(lineDic)
+            #end if
+        #next
+
+        # # その際、CharData2をY座標の高さ順に並び替えるためのリスト「CY」を作成
+        # CharData2=[]
+        # CY = []
+        # for cdata in CharData:
+        #     char2 = cdata[0]
+        #     x0 = cdata[1]
+        #     x1 = cdata[2]
+        #     y0 = cdata[3]
+        #     y1 = cdata[4]
+            
+        #     CharData2.append(cdata)
+        #     CY.append(int(y0))
+        # #next
+        
+        # # リスト「CY」から降順の並び替えインデックッスを取得
+        # y=np.argsort(np.array(CY))[::-1]
+
+        # if len(CharData2) > 0:  # リストが空でない場合に処理を行う
+        #     CharData3 = []
+        #     # インデックスを用いて並べ替えた「CharData3」を作成
+        #     for i in range(len(y)):
+        #         CharData3.append(CharData2[y[i]])
+        #     #next
+
+        #     # 同じ高さのY座標毎にデータをまとめる２次元のリストを作成
+        #     CharData4 = []
+        #     i = 0
+        #     dy = 0
+        #     for f in CharData3:
+        #         if i==0 :   # 最初の文字のY座標を基準値に採用し、仮のリストを初期化
+        #             Fline = []
+        #             Fline.append(f)
+        #             gy = int(f[3])
+        #         else:
+        #             if int(f[3])>= gy-dy and int(f[3])<= gy+dy:   # 同じY座標の場合は、リストに文字を追加
+        #                 Fline.append(f)
+        #             else:           # Y座標が異なる場合は、リストを「CharData4」を保存し、仮のリストを初期化
+        #                 if len(Fline) >= 2:
+        #                     CharData4.append(Fline)
+        #                 gy = int(f[3])
+        #                 Fline = []
+        #                 Fline.append(f)
+        #             #end if
+        #         #end if
+        #         i += 1
+        #     #next
+        #     # 仮のリストが残っている場合は、リストを「CharData4」を保存
+        #     if len(Fline) >= 4:
+        #         CharData4.append(Fline)
+        #     #end if
+
+        #     # 次にX座標の順番にデータを並び替える（昇順）
+        #     t1 = []
+        #     CharData5 = []
+        #     for F1 in CharData4:    # Y座標が同じデータを抜き出す。                        
+        #         CX = []         # 各データのX座標のデータリストを作成
+        #         for F2 in F1:
+        #             CX.append(F2[1])
+        #         #next
+                
+        #         # リスト「CX」から降順の並び替えインデックッスを取得
+        #         x=np.argsort(np.array(CX))
+                
+        #         # インデックスを用いて並べ替えた「F3」を作成
+        #         F3 = []
+        #         t2 = ""
+        #         for i in range(len(x)):
+        #             F3.append(F1[x[i]])
+        #             t3 = F1[x[i]][0]
+        #             t2 += t3
+        #             # if t3 != " ":
+        #             #     t2 += t3
+        #             #end if
+        #         #next
+        #         # t1 += t2 + "\n"
+        #         t1.append(t2)
+        #         # print(t2,len(F3))
+        #         CharData5.append(F3)
+        #     #next
+        # #end if
+
+        # CharData2 = []
+        # for lt in layout:
+        #     if isinstance(lt, LTChar):  # レイアウトデータうち、LTCharのみを取得
+        #         char1 = lt.get_text()   # レイアウトデータに含まれる全文字を取得
+        #         if lt.matrix[1] > 0.0 : # 正の回転している文字のみを抽出
+        #             CharData2.append([char1, lt.x0, lt.x1, lt.y0, lt.y1,lt.matrix])
+        #         #end if
+        #     #end if
+        # #nexr
+        # for lt in layout:
+        #     if isinstance(lt, LTChar):  # レイアウトデータうち、LTCharのみを取得
+        #         char1 = lt.get_text()   # レイアウトデータに含まれる全文字を取得
+        #         if lt.matrix[1] < 0.0 : # 正の回転している文字のみを抽出
+        #             CharData2.append([char1, lt.x0, lt.x1, lt.y0, lt.y1,lt.matrix])
+        #         #end if
+        #     #end iuf
+        # #next
+        
+        # fline = []
+        # Sflag = False
+        # tt2 = ""
+        
+        # fline = []
+        # Sflag = False
+        # tt2 = ""
+        # for F1 in CharData2:
+        #     if not Sflag:
+        #         if F1[0] != " ":
+        #             fline.append(F1)
+        #             tt2 += F1[0]
+        #             Sflag = True
+        #         #end if
+        #     else:
+        #         if F1[0] == " ":
+        #             CharData5.append(fline)
+        #             t1.append(tt2)
+        #             fline = []
+        #             tt2 = ""
+        #             Sflag = False
+        #         else:
+        #             fline.append(F1)
+        #             tt2 += F1[0]
+        #         #end if
+        #     #end if
+        # #next
+
+        # if len(fline)>0:
+        #     tt2=tt2.replace(" ","").replace("　","")
+        #     CharData5.append(fline)
+        #     t1.append(tt2)
+        # #end if
+
+        return  LineData
     #end def
     #*********************************************************************************
 
@@ -1347,10 +2080,11 @@ class ChartReader:
 
 if __name__ == '__main__':
     
-    pdfname = "構造計算書の部材表.pdf"
+    # pdfname = "構造計算書の部材表.pdf"
     # pdfname = "01(2)Ⅲ構造計算書(2)一貫計算編電算出力.pdf"
     # pdfname = "03sawarabi 京都六角 計算書 (事前用).pdf"
     # pdfname = "03構造計算書（部材リストのみ）.pdf"
+    pdfname = "構造計算書断面リスト1.pdf"
     
     # pdfname = "02一貫計算書（一部）.pdf"
     ElementData = Read_Elements_from_pdf(pdfname)
